@@ -1,0 +1,444 @@
+---
+title: ""
+author: ""
+date: "11/1/2020"
+bibliography: A3_bib.bib
+fontsize: 10pt
+link-citations: yes
+linkcolor: blue
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+
+```{r setup, include=FALSE}
+library(MASS)
+library(tidyverse)
+library(magrittr)
+library(qqtest)
+library(car)
+library(lmtest)
+library(lme4)
+library(dplyr)
+library(haven)
+library(ggplot2)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, error=FALSE}
+# import the survey data
+survey_data = read_csv("survey_data.csv")
+# str(survey_data)
+```
+
+# Prediction on Overall Popular Vote of 2020 American Federal Election by Multilevel Regression with Post-Stratification
+
+## Yuika Cho, Mengyu Lei, Yimeng Ma, Qiyun Wang
+## 2020-10-31
+
+# Model
+
+Here we are going to predict the popular vote outcome of the 2020 American federal election (include citation). To do this, we access the survey data [@survey_data] and census data[@census_data] and then employ the post-stratification technique[@post_stratify]. In the following sub-sections we will describe the data reprocessing, the model specifics and the post-stratification calculation.
+
+## Data Preprocessing
+
+After comparison with survey data and census data, we find out the co-variables common to these two datasets, which are describing `citizen`, `gender`, `census_region`, `hispanic`, `race`, `income`, `education`, `state` and `age`. However, the levels or the ways to classification of variables in these two datasets are not the same. Thus, we unified the grouping of co-variables. The details of regrouping variables will be shown in Appendix. The response variable is `vote_trump`,which is a binary variable of voting Donald Trump. 
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, error=FALSE}
+# group and rename the variables
+survey_data %<>% 
+  mutate(
+    citizen = case_when(
+      foreign_born == "The United States" ~ "Citizen",
+      foreign_born == "Another country" ~ "Non_citizen",
+    ),
+    
+   hispanic = case_when(
+      hispanic == "Not Hispanic" ~ "not hispanic", 
+      hispanic == "Mexican" ~ "mexican",
+      hispanic == "Puerto Rican" ~ "puerto rican",
+      hispanic == "Cuban" ~ "cuban",
+      TRUE ~ "other"
+    ),
+    
+    race = case_when(
+      race_ethnicity == "White" ~ "White",
+      race_ethnicity == "Black, or African American" ~ "Black",
+      grepl("Asian", race_ethnicity) ~ " Asian",
+      race_ethnicity == "American Indian or Alaska Native" ~ "American Indian",
+      grepl("Pacific", race_ethnicity) ~ "Pacific",
+      TRUE ~ "Others",
+    ),
+    
+    income = case_when(
+      household_income %in% c("Less than $14,999", "$15,000 to $19,999", "$20,000 to $24,999", 
+                              "$25,000 to $29,999") ~ "Low Income",
+      household_income %in% c("$150,000 to $174,999", "$175,000 to $199,999",
+                              "$200,000 to $249,999", "$250,000 and above") ~ "High Income",
+      TRUE ~ "Median Income",
+    ),
+    
+    education = case_when(
+      education %in% c("High school graduate", 
+                       "Middle School - Grades 4 - 8", 
+                       "Completed some high school",
+                       "3rd Grade or less",
+                       "Other post high school vocational training") ~ "Below Bachelor", 
+      education %in% c("Associate Degree", 
+                       "College Degree (such as B.A., B.S.)", 
+                       "Completed some college, but no degree") ~ "Bachelor",
+      education %in% c("Masters degree", 
+                       "Completed some graduate, but no degree", 
+                       "Doctorate degree") ~ "Above Bachelor"
+    )
+  ) %>% 
+  # select all the original variables for the following models
+  dplyr::select(citizen, gender, census_region, hispanic, race, income, education, state, age, vote_trump) %>%
+  # omit all the NAs
+  na.omit()
+
+# str(survey_data)
+```
+
+## Model Specifics
+
+Since the response variable is binary. Firstly, we apply Generalized linear model(GLM) [@nelder1972generalized], specifically a logistic linear regression, with using all valid covariates introduced above and their two-way interaction terms (`Model1`). 
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, error=FALSE}
+# original model with all two-way interaction terms
+formula = vote_trump ~ (age + citizen + gender + hispanic + race + income + census_region)^2
+model1 = glm(formula, data = survey_data, 
+               family = binomial)
+```
+
+From the summary report of the `Model1`, we could find most of the variables are not significant. This may because the variables are correlated and redundant. The Bayesian information criterion (BIC)[@schwarz1978estimating], usually results in more parsimonious model than the Akaike information criterion (AIC). So we use the BIC stepwise function to select a better model. Let $p$ represent the probability of voting Trump. As a result, the final model(`Model2`) is:
+
+\[\begin{array}{lcl}  
+Model2: \hat{\eta}= \log\left(\frac{\hat{p}}{1-\hat{p}}\right) &=& \hat{\beta}_{0}+\hat{\beta}_{1} \text{age }+\hat{\beta}_{2} \text{citizen}+\hat{\beta}_{3} \text{census region}+\hat{\beta}_{4} \text{income}+
+\\
+& = & \hat{\beta}_{5} \text{race}+\hat{\beta}_{6} \text{gender}+\hat{\beta}_{7} \text{income:age}
+\end{array} 
+\]
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, error=FALSE}
+# using BIC to select model
+model2 = MASS::stepAIC(model1, trace = FALSE, k = log(6475))
+# summary(model2)
+```
+
+As for model diagnostics, we use QQ-Plot for checking Normality of residuals, fitted value v.s. residuals plot for checking Homoscedasticity and Ljung-Box test for Independence. The model can be acceptable after validation and the details are shown in Appendix.
+
+
+## Post-Stratification
+
+After we decided the variables in the model above, we can apply this model on the census data to have a overall prediction on the vote rates. However, the covariates have seriously imbalanced levels in the census data. For example, only 238805 observations are citizen while 2940341 are non-citizen. Post-stratification involves adjusting the sampling weights so that they sum to the population sizes within each post-stratum. This usually results in decreasing bias because of non-response and underrepresented groups in the population. Thus, we create 4 cells based on the most 4 imbalanced variable, which are `citizen`, `census_region`, `race` and `income`. Since every variable has several levels, the combinations of these 4 cells will generate $2 \times 4 \times 5 \times 3 = 120$ groups. In each group, the features are similar so that we can get more accurate prediction.
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, error=FALSE}
+# Turn to census data
+census_data = read_csv("census_data.csv") 
+```
+
+
+```{r , echo=FALSE, message = FALSE, warning = FALSE, error=FALSE}
+# Group and Rename the census data to be consistent with survey data
+census_data %<>% 
+  mutate(
+    citizen = case_when(
+      citizen %in% c("naturalized citizen", "born abroad of american parents") ~ "Citizen",
+      TRUE ~ "Non_citizen",
+    ),
+    
+    gender = case_when(
+      sex == "female" ~ "Female", 
+      sex == "male" ~ "Male"
+    ),
+    
+    income = case_when(
+      inctot < 30000 ~ "Low Income",
+      inctot > 150000 ~ "High Income",
+      TRUE ~ "Median Income",
+    ),
+    
+    census_region = case_when(
+      region %in% c("east south central div", 
+                    "west south central div",
+                    "south atlantic division") ~ "South",
+      region %in% c("east north central div",
+                    "new england division") ~ "Northeast",
+      region %in% c("pacific division",
+                    "mountain division",
+                    "west north central div") ~ "West",
+      region %in% c("middle atlantic division") ~ "Midwest"
+    ),
+    
+    race = case_when(
+      race %in% c("chinese", "japanese") ~ "Asian",
+      race == "black/african american/negro" ~ "Black",
+      race == "white" ~ "White",
+      race == "other asian or pacific islander" ~ "Pacific",
+      race == "american indian or alaska native" ~ "American Indian",
+      TRUE ~ "other",
+    )
+    
+  ) %>% 
+  # select variables to fit models (adding stateicp for result analysis)
+  dplyr::select(citizen, gender, census_region, race, income, age, stateicp) %>% 
+  # omit the NAs
+  na.omit()
+```
+
+
+```{r, echo=FALSE}
+group_citizen <- census_data %>%
+  group_by(citizen) %>%
+    summarise(n = n())
+```
+
+# Results
+
+The summary of final model is:
+
+```{r, fig.width=6, fig.height=3, echo=FALSE, message = FALSE, warning = FALSE, error=FALSE}
+knitr::kable(summary(model2)$coefficients,
+  digits = 3
+)
+```
+
+
+As for survey data, the vote rates between Trump and Biden for each state can be shown in `Figure 1`. From the plot, we can find almost all the states have higher probability to vote Biden, except Arkansas and West Virginia. Again, the red and blue horizontal lines represent the mean of rates, where the higher support rates for Biden is more obvious. 
+
+```{r, fig.width=5, fig.height=3, echo=FALSE, fig.align='center', message = FALSE, warning = FALSE, error=FALSE}
+# find out vote rates for 2020 survey data
+try_survey <- survey_data %>%
+  group_by(state, vote_trump) %>%
+    summarise(n = n())
+# find out vote rates in different states
+survey_trump_rate = rep(0, 51)
+survey_biden_rate = rep(0, 51)
+n = try_survey$n
+for (i in c(1:51)){
+  survey_trump_rate[i] = n[2*i]/(n[2*i-1]+n[2*i])
+  survey_biden_rate[i] = 1- survey_trump_rate[i]
+}
+
+mean_trump = mean(survey_trump_rate)
+mean_biden = mean(survey_biden_rate)
+# mean_biden
+# mean_trump
+# plot the vote rates for these two parties in different states
+state = unique(try_survey$state)
+rate_state = data.frame(state = rep(state, times = 2), 
+                        type = rep(c('Trump','Biden'), each = 51), 
+                        value = c(survey_trump_rate, survey_biden_rate))
+
+
+ggplot(data = rate_state, 
+       mapping = aes(x = state, y = value, colour = type, shape = type, fill = type))+ 
+  geom_line() + 
+  geom_hline(yintercept = mean_trump, color="blue") + 
+  geom_hline(yintercept = mean_biden, color="red") + 
+  geom_point() + 
+    scale_color_manual(values = c('steelblue','darkred')) +
+    scale_shape_manual(values = c(21,23)) + 
+    scale_fill_manual(values = c('red','blue')) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  labs(
+    x = "state",
+    y = "Winning Rates",
+    caption = "Figure 1: Vote Rates for 2020 Survey Data"
+  )
+
+```
+
+Turning to the census data, we use `Model2` with post-stratification to predict the overall vote rates for Trump and Biden. Firstly, we calculate the probability using $\hat{p}=\frac{e^{\hat{\eta}}}{1+e^{\hat{\eta}}}$ and then split the probability to the binary predicted value. Since $p$ represents the probability of voting Trump, the predicted value will be 1 if $\hat{p} \geq 0.5$, otherwise 0. 
+
+Later, we apply post-stratification by $\hat{y}^{P S}=\frac{\sum N_{j} \widehat{y}_{j}}{\sum N_{j}}$, where $\hat{y}_{j}$ is the estimate in each cell and $N_{j}$ is the population size of the $j^{t h}$ cell based off demographics.
+
+
+
+
+
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, error=FALSE}
+# set cells(citizen, census_region, race, income) and regroup census data
+grouped_census <- census_data %>%
+  group_by(citizen, census_region, race, income) %>%
+    summarise(n = n()) %>% 
+    ungroup() %>% 
+    mutate(
+      proba = n/sum(n)
+    )
+```
+
+`Figure 2` illustrates the prediction of overall popular vote in the 2020 American federal election, which tells us Biden will have absolutely advantage of 74.61% probability to be the president, while Donald Trump will have only 25.39% to win the election. This prediction result may be surprised to some people since there are some issues about the sample data and model, which will be talked in the next part. 
+
+
+```{r , fig.width=5, fig.height=5, echo=FALSE, fig.align='center', message = FALSE, warning = FALSE, error=FALSE}
+# using the final model above to fit census data
+est = predict(model2, data = grouped_census)
+# find out the probability of 0 and 1 output
+est_value = exp(est)/(1 + exp(est))
+# binary the probability
+output = rep(0, length(est_value))
+for (i in c(1:length(est_value))){
+  if (est_value[i] > 0.5){
+    output[i] = 1
+  }
+  else{
+    output[i] = 0
+  }
+}
+# Calculate the winning probabilities of two parties
+prob_trump = sum(output)/length(output)
+prob_biden = 1 - prob_trump
+# c(prob_biden, prob_trump)
+
+# Plot the Pie Chart for predicted probability
+data = data.frame(
+  group = c("Win Proba.(Biden): 74.61%", "Win Proba.(Trump): 25.39%"),
+  value = c(prob_biden, prob_trump))
+
+# Compute the position of labels
+data = data %>% 
+  arrange(desc(group)) %>%
+  mutate(prop = value / sum(data$value) *100) %>%
+  mutate(ypos = cumsum(prop)- 0.5*prop)
+
+# Piechart
+ggplot(data, aes(x="", y=prop, fill=group)) +
+  geom_bar(stat="identity", width=1, color="white") +
+  coord_polar("y", start=0) +
+  theme_void() + 
+  theme(legend.position="none") +
+  geom_text(aes(y = ypos, label = group), color = "white", size = 3) +
+  scale_fill_brewer(palette="Set1") + 
+  theme_classic() + 
+  labs(
+    caption = "Figure 2: The Pie Chart of Overall Winning Probabilities"
+  )
+```
+
+We use `State` as cell to do Post-stratification again, the creation results are still show Biden will have 74.64% probability to win the election. 
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE, error=FALSE}
+try_census <- census_data %>%
+  group_by(stateicp) %>%
+    summarise(n = n()) %>% 
+    ungroup() %>% 
+    mutate(
+      weight = n/sum(n)
+    )
+# using the final model above to fit census data
+est2 = predict(model2, data = try_census)
+# find out the probability of 0 and 1 output
+est_value2 = exp(est2)/(1 + exp(est2))
+# binary the probability
+output2 = rep(0, length(est_value2))
+for (i in c(1:length(est_value2))){
+  if (est_value2[i] > 0.5){
+    output2[i] = 1
+  }
+  else{
+    output2[i] = 0
+  }
+}
+# Calculate the winning probabilities of two parties
+prob_trump2 = sum(output2)/length(output2)
+prob_biden2 = 1 - prob_trump2
+c(prob_biden2, prob_trump2)
+```
+
+# Discussion
+
+## Conclusions
+
+**Prediction Results:** By calculating the vote rates from survey data, we find that almost all the states are more likely to vote Biden. The simple mean vote rates for Trump and Biden are 38.65% and 61.35% separately. After considering the effect of imbalanced data and applying post-stratified technique, the overall vote rates for Trump and Biden are 25.39% and 74.61%. Again, after applying `State` as cell to run the Post-stratification, the results are still similar to the original post-stratification ways. Although the final election result is not affected by the specific prediction rates, the probabilities changed a lot when applying post-stratification. We may conclude post-stratification helps deal with the issues caused by imbalanced data.
+
+**Model Coefficients:**  From the summary of `Model2`, we can conclude:
+
+(1) Voters who are citizens, male, white, American Indian with high income and from South region are more likely to vote Trump; 
+
+(2) Black with low or median income voters are more willing to supporting Biden.
+
+
+## Weakness and Future Work
+
+**Weakness: **
+
+(1) Although the final prediction results show Biden will have absolute advantage to win the election, there still exist a lot of uncertainty before the
+official results are announced. Because there may be black swan incidents in recent days, for example, Trump has unfavorable information about Biden, which may directly lead to the defeat of Biden. Thus, these uncertainty but vital factors are those we can not expect in our prediction.
+
+(2) In the United States, candidate wins majority of votes will win all votes allocated by the state. However, in our prediction, we only consider the prediction for each voter without taking care of the overall situation in each state. This may lead to some forecast bias.
+
+(3) The response bias and selection bias of the survey data might also be the reasons to prediction bias. Under COVID-19, the survey data are mostly collected by Internet or telephone. It is difficult to get the true responses from those who are old, poor, indifferent to politics and not familiar with the electronic equipment. 
+
+
+**Future Work: **
+
+(1) We will continue to pay attention to any behavioral information about the candidates before the results of the general election are announced to avoid black swan incidents, which can provide corrections to our predictions.
+
+(2) In next step, it will be a big direction to apply the "Winner take all" rule in our prediction to make correction. Also, the method of collecting data should be more refined so that the data can represent the intentions of more even all voters. 
+
+\pagebreak
+
+
+# Appendix
+
+## Modified variables in two datasets
+
+As for `survry_data` and `census_data`, we just group each level and rename them to be consistent without adding more levels for `citizen`, `gender`, `census_region`, `hispanic`, `race`, `state`, and `age`. For `education` and `income` , we integrate some levels to one new level, which can help simplify our model. The `education` variable is split to `Below Bachelor`, `Bachelor` and `Above Bachelor`, and `income` is classified to `Low Income`, `Median Income` and `High Income`.  
+
+
+## Model Diagnostics
+
+### 1. Normality of residuals
+
+```{r, fig.align = "center", out.width = "70%", echo = FALSE}
+# Diagnostics
+# 1. QQ-plot
+residual = residuals(model2, "pearson", scaled = TRUE) 
+tibble(residuals = residual) %>% ggplot(aes(sample = residuals)) + stat_qq() + stat_qq_line() + 
+  labs(caption = "Figure 3: QQ-Plot")
+```
+
+
+In statistics, a QQ (quantile-quantile) plot is a probability plot, which is a graphical method for comparing two probability distributions by plotting their quantiles against each other. From the QQ plot above `Figure 3`, we can find although some points are on the straight line, there still large part of points are not on the straight line, which means the residuals doesn't fit normal distribution very well.
+
+### 2. Homoscedasticity
+
+```{r, fig.align = "center", out.width = "70%", echo = FALSE}
+# 2. fitted v.s. residuals
+diagd = tibble(resid = residuals(model2), fitted = fitted(model2))
+diagd %>% ggplot(aes(x=fitted,y=resid)) + 
+  geom_point(alpha=0.3) + 
+  geom_hline(yintercept=0) + 
+  labs(x="Fitted", y="Residuals",
+       caption = "Figure 4: Fitted values v.s. Residules")
+```
+
+From the figure above `Figure 4`, we can find though the points have some trends, they are on the two sides around zero. Thus, it is not very confident to state the variance is constant, which also means there may not exist homoscedasticity.
+
+### 3. Independence
+
+From the R output, we can find the p-value of Ljung-Box test [@ljung1978measure] is 0.6644, which means we have no enough evidence to reject null hypothesis and then all of the variables are independent. 
+
+```{r}
+# 3. independence
+Box.test(residual)
+```
+
+
+# References
+
+
+
+
+
+
+
+
+
+
+
